@@ -5,6 +5,7 @@ from PyQt5.QtWidgets import (
     QApplication, QWidget, QLabel, QPushButton, QFileDialog,
     QVBoxLayout, QMessageBox, QInputDialog, QLineEdit, QFrame, QHBoxLayout
 )
+import os
 import ctypes
 from PyQt5.QtGui import QFont
 from PyQt5.QtCore import Qt
@@ -31,7 +32,6 @@ class SingleInstanceApp(QApplication):
             sys.exit(0)
 
 class CertConverter(QWidget):
-    REQUIRED_ROOT_FINGERPRINT = "a79e41380bab3ed7f5188d9a5209cefcb3ca6991"
 
     def __init__(self):
         super().__init__()
@@ -139,21 +139,26 @@ class CertConverter(QWidget):
 
         self.setLayout(layout)
 
+    def load_certificate_flexible(self, data):
+        # Try PEM first, then DER
+        loaders = [x509.load_pem_x509_certificate, x509.load_der_x509_certificate]
+        for loader in loaders:
+            try:
+                cert = loader(data, default_backend())
+                print(f"[INFO] Loaded certificate with {loader.__name__}")
+                return cert
+            except Exception:
+                continue
+        raise Exception("Failed to load certificate as PEM or DER format.")
+
     def convert_cer_to_pem(self):
         file_path, _ = QFileDialog.getOpenFileName(self, "Select .cer File", "", "Certificate Files (*.cer *.crt *.pem *.pfx *.p12)")
         if file_path:
             try:
-                print(f"[INFO] Reading .cer: {file_path}")
                 with open(file_path, 'rb') as cer_file:
                     cer_data = cer_file.read()
 
-                try:
-                    cert = x509.load_der_x509_certificate(cer_data, default_backend())
-                    print("[INFO] Loaded as DER format")
-                except Exception:
-                    print("[WARN] Not DER, trying PEM...")
-                    cert = x509.load_pem_x509_certificate(cer_data, default_backend())
-                    print("[INFO] Loaded as PEM format")
+                cert = self.load_certificate_flexible(cer_data)
 
                 pem_data = cert.public_bytes(encoding=serialization.Encoding.PEM)
                 pem_path = file_path.rsplit('.', 1)[0] + "_converted.pem"
@@ -228,48 +233,79 @@ class CertConverter(QWidget):
 
     def load_certificate(self, file_path):
         """
-        Load certificate from .cer/.pem or .pfx file, returning (x509.Certificate, additional_certificates).
-        additional_certificates is None for non-pfx files.
+        Load certificate from .cer/.pem/.crt or .pfx/.p12 file.
+        Returns (x509.Certificate, additional_certs or None)
         """
-        while True:
-            password, ok = QInputDialog.getText(
-                self, "Enter PFX Password", "Password:", QLineEdit.Password
-            )
-            if not ok:
-                return None, None
+        ext = os.path.splitext(file_path)[1].lower()
 
-            try:
-                with open(file_path, 'rb') as f:
-                    pfx_data = f.read()
-
-                private_key, certificate, additional_certs = pkcs12.load_key_and_certificates(
-                    pfx_data,
-                    password.encode() if password else None,
-                    backend=default_backend()
+        if ext in [".pfx", ".p12"]:
+            # Prompt password for PFX
+            while True:
+                password, ok = QInputDialog.getText(
+                    self, "Enter PFX Password", "Password:", QLineEdit.Password
                 )
-
-                if certificate is None:
-                    QMessageBox.warning(self, "No Certificate", "No certificate found in the PFX file.")
+                if not ok:
                     return None, None
 
-                print("[INFO] Loaded certificate from PFX")
-                return certificate, additional_certs
+                try:
+                    with open(file_path, 'rb') as f:
+                        pfx_data = f.read()
 
-            except Exception:
-                QMessageBox.warning(self, "Incorrect Password", "Incorrect password. Please try again.")
+                    private_key, certificate, additional_certs = pkcs12.load_key_and_certificates(
+                        pfx_data,
+                        password.encode() if password else None,
+                        backend=default_backend()
+                    )
+
+                    if certificate is None:
+                        QMessageBox.warning(self, "No Certificate", "No certificate found in the PFX file.")
+                        return None, None
+
+                    print("[INFO] Loaded certificate from PFX")
+                    return certificate, additional_certs
+
+                except Exception:
+                    QMessageBox.warning(self, "Incorrect Password", "Incorrect password. Please try again.")
+        else:
+            try:
+                with open(file_path, 'rb') as f:
+                    data = f.read()
+
+                try:
+                    cert = x509.load_der_x509_certificate(data, default_backend())
+                    print("[INFO] Loaded DER certificate")
+                except Exception:
+                    cert = x509.load_pem_x509_certificate(data, default_backend())
+                    print("[INFO] Loaded PEM certificate")
+
+                return cert, None
+
+            except Exception as e:
+                QMessageBox.critical(self, "Error", f"Failed to load certificate:\n{str(e)}")
+                return None, None
+
 
     def get_root_cert_fingerprint(self, cert, additional_certs):
-        # Determine root certificate: self-signed cert from additional_certs or leaf if self-signed
+        # Check if cert itself is self-signed (root)
+        def is_self_signed(c):
+            return c.issuer == c.subject
+
         root_cert = None
-        if cert.subject == cert.issuer:
-            root_cert = cert
-        elif additional_certs:
+
+        # 1) Check additional certs for self-signed root
+        if additional_certs:
             for c in additional_certs:
-                if c.subject == c.issuer:
+                if is_self_signed(c):
                     root_cert = c
                     break
+
+        # 2) If not found, check if cert is self-signed
         if root_cert is None:
-            # fallback to leaf cert itself
+            if is_self_signed(cert):
+                root_cert = cert
+
+        # 3) If still no root_cert, fallback to cert itself (leaf)
+        if root_cert is None:
             root_cert = cert
 
         fingerprint = root_cert.fingerprint(hashes.SHA1())
@@ -290,14 +326,7 @@ class CertConverter(QWidget):
             if cert is None:
                 return
 
-            root_fp = self.get_root_cert_fingerprint(cert, additional_certs)
-            print(f"[INFO] Root certificate SHA1 fingerprint: {root_fp}")
-
-            if root_fp.lower() != self.REQUIRED_ROOT_FINGERPRINT.lower():
-                QMessageBox.warning(self, "Root Certificate Mismatch",
-                                    "The selected certificate was not issued by 'CCA India 2022 Root'. Please choose a valid digital certificate recognized by the Government of India.\nSkipping CRL revocation check.")
-                return
-
+    
             # Extract CRL Distribution Point URL
             try:
                 crl_dp = cert.extensions.get_extension_for_class(x509.CRLDistributionPoints)
@@ -326,7 +355,11 @@ class CertConverter(QWidget):
             if response.status_code != 200:
                 raise Exception(f"Failed to fetch CRL: HTTP {response.status_code}")
 
-            crl = x509.load_der_x509_crl(response.content, default_backend())
+            crl_data = response.content
+            try:
+                crl = x509.load_der_x509_crl(crl_data, default_backend())
+            except ValueError:
+                crl = x509.load_pem_x509_crl(crl_data, default_backend())
             serial = cert.serial_number
             revoked = crl.get_revoked_certificate_by_serial_number(serial)
 
@@ -355,14 +388,6 @@ class CertConverter(QWidget):
         try:
             cert, additional_certs = self.load_certificate(file_path)
             if cert is None:
-                return
-
-            root_fp = self.get_root_cert_fingerprint(cert, additional_certs)
-            print(f"[INFO] Root certificate SHA1 fingerprint: {root_fp}")
-
-            if root_fp.lower() != self.REQUIRED_ROOT_FINGERPRINT.lower():
-                QMessageBox.warning(self, "Root Certificate Mismatch",
-                                    "The selected certificate was not issued by 'CCA India 2022 Root'. Please choose a valid digital certificate recognized by the Government of India. \nSkipping OCSP revocation check.")
                 return
 
             # Extract OCSP URL and Issuer cert URL from AIA extension
@@ -436,7 +461,7 @@ if __name__ == "__main__":
         # Relaunch as admin and exit current instance
         ctypes.windll.shell32.ShellExecuteW(None, "runas", sys.executable, __file__, None, 1)
         sys.exit()
-        
+
     app = SingleInstanceApp(sys.argv)
     app.setStyleSheet(qdarkstyle.load_stylesheet_pyqt5())
     window = CertConverter()
