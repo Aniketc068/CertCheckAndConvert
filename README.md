@@ -31,7 +31,7 @@ A PyQt5-based desktop application to **convert digital certificates** (.cer, .pf
 
 ## Screenshots
 
-![App GUI]([https://www.managexindia.com/GUI.png](https://github.com/Aniketc068/CertCheckAndConvert/blob/main/GUI.png))
+![App GUI](https://github.com/Aniketc068/CertCheckAndConvert/blob/main/GUI.png)
 
 ## Supported Certificate Types
 
