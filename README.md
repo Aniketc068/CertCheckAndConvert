@@ -1,6 +1,6 @@
 # CertConverter & Revocation Checker
 
-A PyQt5-based desktop application to **convert digital certificates** (.cer, .pfx) to PEM format and **check their revocation status** using CRL and OCSP protocols. This tool is designed for secure and easy management of certificates**.
+A PyQt5-based desktop application to **convert digital certificates** (.cer, .pfx) to PEM format and **check their revocation status** using CRL and OCSP protocols. This tool is designed for secure and easy management of certificates.
 
 ---
 
